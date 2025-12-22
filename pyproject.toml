@@ -1,0 +1,72 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "simplevals"
+version = "0.1.0"
+description = "Benchmarking Vision-Language Models for Traditional Chinese in Taiwan (VisTW)"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "VisTW Contributors"}
+]
+keywords = ["vision-language", "benchmark", "traditional-chinese", "taiwan", "evaluation", "llm", "vlm"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "datasets",
+    "huggingface-hub",
+    "openai",
+    "anthropic",
+    "google-generativeai",
+    "together",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+    "black",
+    "isort",
+    "flake8",
+]
+
+[project.urls]
+Homepage = "https://github.com/your-username/vistw"
+Repository = "https://github.com/your-username/vistw"
+Issues = "https://github.com/your-username/vistw/issues"
+
+[tool.setuptools]
+packages = ["simplevals", "llms"]
+
+[tool.setuptools.package-data]
+simplevals = ["*.py"]
+llms = ["*.py"]
+
+[tool.black]
+line-length = 100
+target-version = ["py38", "py39", "py310", "py311"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"

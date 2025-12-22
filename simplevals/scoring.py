@@ -2,6 +2,7 @@ import os
 import json
 import math
 import argparse
+import glob
 from tqdm import tqdm
 import numpy as np
 from datasets import load_dataset
@@ -16,7 +17,7 @@ def evaluate(judge, preds, output_path, major_vote_count=5, include_image=False)
     thread_id2question = {}
 
     # Load dataset
-    for row in load_dataset("TMMU/freeform", split="test"):
+    for row in load_dataset("VisTai/vistw-dialogue", split="test"):
         tid = row['thread_id']
         thread_id2question[tid] = row['question']
         thread_id2image[tid] = row['image']
@@ -94,7 +95,7 @@ def evaluate(judge, preds, output_path, major_vote_count=5, include_image=False)
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Evaluate LLM responses")
-    parser.add_argument("--input_jsonl", required=True, help="Input JSONL which contains question_id, llm_response")
+    parser.add_argument("--input_jsonl", required=True, help="Input JSONL file(s) containing question_id and llm_response. Supports wildcards (e.g., 'logs/*.jsonl' or 'results_*.jsonl')")
     parser.add_argument("--series", default="gemini", choices=["gemini_dev", "gemini", "openai"], help="LLM series")
     parser.add_argument("--model", default="gemini-2.0-flash-001", help="Model name")
     parser.add_argument("--include_image", action="store_true", help="Include images in evaluation")
@@ -169,38 +170,96 @@ def main():
     # Parse command-line arguments
     args = parse_arguments()
 
-    # Load predictions from input file
-    preds = []
-    with open(args.input_jsonl, 'r', encoding='utf-8') as f:
-        for line in f:
-            try:
-                preds.append(json.loads(line.strip()))
-            except:
-                continue
+    # Find all files matching the wildcard pattern
+    input_files = glob.glob(args.input_jsonl)
 
-    # Create output filename based on input file and arguments
-    input_base = os.path.basename(args.input_jsonl).replace(".jsonl", "")
-    output_dir = os.path.join(os.path.dirname(args.input_jsonl), "score_board")
-    model_name = args.model
-    if '/' in model_name:
-        model_name = model_name.split('/')[-1].split(':')[0]
-    output_filename = f"{input_base}_scores_{model_name}_{args.series}_img{int(args.include_image)}_vote{args.voting_count}.jsonl"
-    output_path = os.path.join(output_dir, output_filename)
+    if not input_files:
+        print(f"Error: No files found matching pattern: {args.input_jsonl}")
+        return
 
-    # Initialize judge LLM
+    print(f"Found {len(input_files)} file(s) matching pattern: {args.input_jsonl}")
+    for f in input_files:
+        print(f"  - {f}")
+    print()
+
+    # Initialize judge LLM once for all files
     judge = get_llm(args.model, series=args.series)
 
-    # Run evaluation
-    evaluate(
-        judge=judge,
-        preds=preds,
-        output_path=output_path,
-        major_vote_count=args.voting_count,
-        include_image=args.include_image
-    )
+    # Process each file individually
+    for file_idx, input_file in enumerate(input_files, 1):
+        print("=" * 70)
+        print(f"Processing file {file_idx}/{len(input_files)}: {input_file}")
+        print("=" * 70)
 
-    # Print summary of results
-    pretty_print_results(output_path)
+        # Load predictions from current file
+        preds = []
+        pred_thread_ids = set()
+        with open(input_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                try:
+                    pred = json.loads(line.strip())
+                    preds.append(pred)
+                    pred_thread_ids.add(pred['question_id'])
+                except:
+                    continue
+
+        print(f"Loaded {len(preds)} predictions from this file")
+
+        # Create output filename for this specific file
+        input_base = os.path.basename(input_file).replace(".jsonl", "")
+        output_dir = os.path.join(os.path.dirname(input_file), "score_board")
+
+        model_name = args.model
+        if '/' in model_name:
+            model_name = model_name.split('/')[-1].split(':')[0]
+        output_filename = f"{input_base}_scores_{model_name}_{args.series}_img{int(args.include_image)}_vote{args.voting_count}.jsonl"
+        output_path = os.path.join(output_dir, output_filename)
+
+        # Check existing progress by matching thread_ids
+        scored_thread_ids = set()
+        if os.path.exists(output_path):
+            with open(output_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    try:
+                        result = json.loads(line.strip())
+                        if 'thread_id' in result:
+                            scored_thread_ids.add(result['thread_id'])
+                    except:
+                        continue
+
+        # Calculate how many predictions from this file are already scored
+        matching_scored = pred_thread_ids & scored_thread_ids
+        existing_count = len(matching_scored)
+        remaining = len(preds) - existing_count
+
+        if remaining == 0:
+            print(f"✓ Already complete ({existing_count}/{len(preds)} scored)")
+            print(f"  Output: {output_path}")
+            print(f"  Skipping...\n")
+            continue
+        elif existing_count > 0:
+            print(f"Resuming: {existing_count}/{len(preds)} already scored, {remaining} remaining")
+        else:
+            print(f"Starting fresh: 0/{len(preds)} scored")
+
+        print(f"Output will be saved to: {output_path}\n")
+
+        # Run evaluation for this file
+        evaluate(
+            judge=judge,
+            preds=preds,
+            output_path=output_path,
+            major_vote_count=args.voting_count,
+            include_image=args.include_image
+        )
+
+        # Print summary of results for this file
+        pretty_print_results(output_path)
+        print()
+
+    print("=" * 70)
+    print(f"Completed processing all {len(input_files)} file(s)")
+    print("=" * 70)
 
 
 if __name__ == "__main__":

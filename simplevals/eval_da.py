@@ -4,6 +4,8 @@ import argparse
 from typing import List
 from tqdm import tqdm
 from datasets import load_dataset
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 from llms.utils import get_llm
 from .utils import (
     write_jsonl,
@@ -28,11 +30,11 @@ def format_question(row, mode, leetspeak=False):
     return question
 
 
-def process_question(row, llm, system_prompt, mode, stats, leetspeak=False):
+def process_question(row, llm, system_prompt, mode, stats, leetspeak=False, stats_lock=None):
     log_entry = {"question_id": stats['total'] }
     question = format_question(row, mode, leetspeak=leetspeak)
     ground_truth = row['answer']
-    
+
     log_entry.update({
         "original_question": row['question'],
         "formatted_question": question,
@@ -50,11 +52,16 @@ def process_question(row, llm, system_prompt, mode, stats, leetspeak=False):
         "normalized_response": normalize_response(res_text)
     })
 
-    evaluate_response(log_entry, mode, stats, sampler)
+    # Use lock for thread-safe stats updates if provided
+    if stats_lock:
+        with stats_lock:
+            evaluate_response(log_entry, mode, stats, sampler)
+    else:
+        evaluate_response(log_entry, mode, stats, sampler)
     return log_entry
 
 
-def eval_dataset(llm, subject_name, mode="image", text_ver=False):
+def eval_dataset(llm, subject_name, mode="image", text_ver=False, max_workers=8):
     if text_ver:
         dataset = load_dataset('VisTai/mcq-text', subject_name, split='test')
         logging_file = f"{subject_name}_text-da-{mode}_{str(llm)}.jsonl"
@@ -64,16 +71,41 @@ def eval_dataset(llm, subject_name, mode="image", text_ver=False):
 
     stats = load_existing_entries(logging_file)
     full_path = os.path.join('execution_results', logging_file)
-    
+
+    # Create lock for thread-safe file writing and stats updates
+    write_lock = Lock()
+
+    def process_row(row):
+        """Process a single row and return the log entry."""
+        system_prompt = BASELINE_PROMPT
+        # Pass lock for thread-safe stats updates
+        log_entry = process_question(row, llm, system_prompt, mode, stats, leetspeak=False, stats_lock=write_lock)
+        return log_entry
+
+    # Collect rows to process
+    rows_to_process = []
+    for idx, row in enumerate(dataset):
+        if idx in stats['existing_entries']:
+            continue
+        rows_to_process.append(row)
+
+    # Process rows in parallel using ThreadPoolExecutor
     with open(full_path, 'a') as log_file:
-        for idx, row in enumerate(tqdm(dataset, dynamic_ncols=True, initial=stats['total'])):
-            if idx in stats['existing_entries']:
-                continue
-            system_prompt = BASELINE_PROMPT
-            log_entry = process_question(row, llm, system_prompt, mode, stats, leetspeak=False)
-            json.dump(log_entry, log_file)
-            log_file.write('\n')
-            log_file.flush()
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks
+            future_to_row = {executor.submit(process_row, row): row for row in rows_to_process}
+
+            # Process completed tasks with progress bar
+            with tqdm(total=len(rows_to_process), dynamic_ncols=True, initial=stats['total']) as pbar:
+                for future in as_completed(future_to_row):
+                    log_entry = future.result()
+                    if log_entry is not None:
+                        # Thread-safe file writing
+                        with write_lock:
+                            json.dump(log_entry, log_file)
+                            log_file.write('\n')
+                            log_file.flush()
+                    pbar.update(1)
 
     write_final_log(logging_file, stats)
     return stats['hit'], stats['total'], stats['correct'], stats['negative_markings']
@@ -92,6 +124,10 @@ def parse_arguments() -> argparse.Namespace:
                         action="store_true",
                         default=False,
                         help="Use text-only mode (default: False)")
+    parser.add_argument("--max_workers",
+                        type=int,
+                        default=16,
+                        help="Number of parallel workers for processing (default: 8)")
     return parser.parse_args()
 
 def get_datasets_to_evaluate(selected_datasets: List[str]) -> List[str]:
@@ -108,7 +144,8 @@ def main():
     for dataset in datasets_to_evaluate:
         print(f"Evaluating {dataset}...")
         hit, total, correct, negative_markings = eval_dataset(llm, dataset,
-                    mode=args.mode, text_ver=args.text_only
+                    mode=args.mode, text_ver=args.text_only,
+                    max_workers=args.max_workers
                 )
         results[dataset] = {
             "score": hit / total,

@@ -23,12 +23,9 @@ class Gemini:
             api_key = os.environ["GEMINI_API_KEY"]
         
         genai.configure(api_key=api_key)
-        
+        # we remove other params because of reasoning models bake in
         self.generation_config = {
-            "temperature": 0.0,
-            "top_p": 1.0,
-            "top_k": 1,
-            "max_output_tokens": 1024,
+            "max_output_tokens": int(8192*2),
         }
         
         self.model = genai.GenerativeModel(

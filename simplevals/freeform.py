@@ -6,6 +6,8 @@ from tqdm import tqdm
 from PIL import Image
 from datasets import load_dataset
 from llms.utils import get_llm
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 from .utils import (
     normalize_response,
 )
@@ -80,29 +82,50 @@ def process_question(row, llm, mode, stats, system_prompt='', resize=None):
     return log_entry
 
 
-def eval_dataset(llm, mode="image", text_ver=False, system_prompt='', resize=None):
+def eval_dataset(llm, mode="image", text_ver=False, system_prompt='', resize=None, max_workers=4):
     dataset = load_dataset('VisTai/vistw-dialogue', split='test')
     if len(system_prompt) == 0:
         logging_file = f"{str(llm)}.jsonl"
     else:
         logging_file = f"{system_prompt}-{str(llm)}.jsonl"
-    
+
     log_dir = "freeform_log"
     if resize is not None:
         log_dir = f"freeform_log{resize}"
-    
+
     os.makedirs(log_dir, exist_ok=True)
     stats = load_existing_entries(logging_file, log_dir=log_dir)
     full_path = os.path.join(log_dir, logging_file)
-    
+
+    # Thread-safe file writing lock
+    write_lock = threading.Lock()
+
+    # Filter out already processed entries
+    rows_to_process = [row for row in dataset if row['thread_id'] not in stats['existing_entries']]
+
     with open(full_path, 'a') as log_file:
-        for idx, row in enumerate(tqdm(dataset, dynamic_ncols=True, initial=stats['total'])):
-            if row['thread_id'] in stats['existing_entries']:
-                continue
-            log_entry = process_question(row, llm, mode, stats, system_prompt=system_prompt, resize=resize)
-            json.dump(log_entry, log_file)
-            log_file.write('\n')
-            log_file.flush()
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks
+            futures = {
+                executor.submit(process_question, row, llm, mode, stats, system_prompt, resize): row
+                for row in rows_to_process
+            }
+
+            # Process completed tasks with progress bar
+            with tqdm(total=len(rows_to_process), dynamic_ncols=True, initial=0) as pbar:
+                for future in as_completed(futures):
+                    try:
+                        log_entry = future.result()
+                        # Thread-safe write to file
+                        with write_lock:
+                            json.dump(log_entry, log_file)
+                            log_file.write('\n')
+                            log_file.flush()
+                    except Exception as e:
+                        row = futures[future]
+                        print(f"Error processing question {row.get('thread_id', 'unknown')}: {e}")
+                    finally:
+                        pbar.update(1)
 
     return stats['total']
 
@@ -116,14 +139,15 @@ def parse_arguments() -> argparse.Namespace:
                         default="text",
                         help="Evaluation mode (default: baseline)")
     parser.add_argument("--resize", type=float, help="Scale factor to resize input images (e.g., 0.5 for 50%)", default=None)
+    parser.add_argument("--max_workers", type=int, help="Number of parallel workers for processing (default: 4)", default=4)
     return parser.parse_args()
 
 
 def main():
     args = parse_arguments()
     llm = get_llm(args.model_name, args.series)
-    print(f"Evaluating FreeForm...")
-    total = eval_dataset(llm, mode=args.mode, system_prompt=args.system_prompt, resize=args.resize)
+    print(f"Evaluating FreeForm with {args.max_workers} parallel workers...")
+    total = eval_dataset(llm, mode=args.mode, system_prompt=args.system_prompt, resize=args.resize, max_workers=args.max_workers)
 
 if __name__ == "__main__":
     main()
